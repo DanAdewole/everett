@@ -216,6 +216,15 @@ memory = Memory()
 
 # ---------------------------------------------------------------- Gemini
 RETRYABLE = {408, 429, 500, 502, 503, 504}
+# Circuit breaker: a model that just hung or said "overloaded" is benched for a while, so the next call goes
+# straight to a healthy one instead of waiting out another timeout (free-tier flash models flap a lot).
+_benched: dict[str, float] = {}
+BENCH_SECONDS = 600
+
+
+def _bench(model: str, why: str) -> None:
+    _benched[model] = time.time() + BENCH_SECONDS
+    log.warning("gemini %s benched for %ds (%s)", model, BENCH_SECONDS, why[:80])
 
 
 def _strip_signatures(contents: list[dict]) -> list[dict]:
@@ -247,13 +256,16 @@ def gemini(contents: list[dict], system: str, tools: list[dict] | None = None,
         body["generationConfig"] = {"responseMimeType": "application/json", "responseSchema": json_schema}
     last = ""
     for attempt in range(rounds):
-        for m in models:
+        now = time.time()
+        healthy = [m for m in models if _benched.get(m, 0) < now]
+        for m in healthy or models:  # if everything is benched, try them all anyway
             payload = body if (m == prefer or prefer is None) else {**body, "contents": _strip_signatures(contents)}
             try:
                 r = http.post(f"{base('gemini')}/v1beta/models/{m}:generateContent", json=payload,
-                              timeout=httpx.Timeout(45, connect=10))
+                              timeout=httpx.Timeout(30, connect=10))
             except httpx.HTTPError as e:
                 last = f"{m}: {e}"
+                _bench(m, f"{type(e).__name__}")
                 continue
             if r.status_code == 200:
                 data = r.json()
@@ -262,6 +274,8 @@ def gemini(contents: list[dict], system: str, tools: list[dict] | None = None,
                 last = f"{m}: empty candidates {str(data)[:200]}"
                 continue
             last = f"{m}: {r.status_code} {r.text[:200]}"
+            if r.status_code in (429, 503, 504):
+                _bench(m, f"HTTP {r.status_code}")
             if r.status_code not in RETRYABLE and r.status_code != 404:
                 log.warning("gemini non-retryable %s", last)
         time.sleep(min(30, 3 * 2 ** attempt))
