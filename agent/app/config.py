@@ -71,19 +71,40 @@ def tenant_of(email: str) -> str:
     return "g-" + hashlib.sha256(email.encode()).hexdigest()[:12]
 
 
-def tenant_token(tenant: str) -> str:
+def _sig(msg: str) -> str:
     import hashlib
     import hmac
-    return hmac.new(DASH_KEY.encode(), tenant.encode(), hashlib.sha256).hexdigest()[:16]
+    return hmac.new(DASH_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def dash_link(path: str = "/") -> str:
-    """Admin (owner) link."""
-    sep = "&" if "?" in path else "?"
-    return f"{PUBLIC_URL}{path}{sep}k={DASH_KEY}" if DASH_KEY else f"{PUBLIC_URL}{path}"
+def make_token(tenant: str, kind: str, ttl_days: float, start: float | None = None) -> str:
+    """'<tenant>.<expiry>.<hmac>': scoped to one tenant, one purpose (login link vs browser session), and expiring.
+    The master key never leaves the Sprite."""
+    import time
+    exp = int((start or time.time()) + ttl_days * 86400)
+    return f"{tenant}.{exp}.{_sig(f'{kind}|{tenant}|{exp}')}"
 
 
-def tenant_link(tenant: str, path: str = "") -> str:
-    if tenant == "owner":
-        return dash_link(path or "/")
-    return f"{PUBLIC_URL}/u/{tenant}{path}?t={tenant_token(tenant)}"
+def verify_token(token: str, kind: str) -> str | None:
+    """Returns the tenant if the token is genuine and unexpired."""
+    import hmac
+    import time
+    try:
+        tenant, exp, sig = (token or "").rsplit(".", 2)
+        if int(exp) < time.time():
+            return None
+    except ValueError:
+        return None
+    return tenant if hmac.compare_digest(sig, _sig(f"{kind}|{tenant}|{exp}")) else None
+
+
+def home_path(tenant: str) -> str:
+    return "/" if tenant == "owner" else f"/u/{tenant}"
+
+
+def tenant_link(tenant: str, path: str = "", valid_from: float | None = None) -> str:
+    """Link for emails: a signed, expiring login token that only opens this tenant's own space.
+    It's exchanged for an HttpOnly cookie on first click, so nothing sensitive stays in the address bar."""
+    from urllib.parse import quote
+    nxt = (home_path(tenant).rstrip("/") + path) or "/"
+    return f"{PUBLIC_URL}/go?t={make_token(tenant, 'login', 14, valid_from)}&next={quote(nxt, safe='/')}"

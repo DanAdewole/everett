@@ -94,7 +94,9 @@ Everett is an AI with access to your documents that **anyone on the internet can
 | **Memory poisoning** by a third party who CCs Everett | Notes taken in observe mode are stored as *unverified, heard from X*, and the model is told never to present them as the owner's words. |
 | **Forged webhooks** | Every event is re-fetched from AgentMail by id; anything that isn't really in the inbox is dropped. Svix signature verification is also supported. |
 | **Data exfiltration** | Everett **cannot email anyone except the sender of the current email**; there is no "send to anyone" tool. Even a successful hijack has nowhere to send data. |
-| **Guests seeing each other's data** | Each sender gets a tenant with a separate Pinecone namespace, Box folder, reminders, undo history and dashboard. Dashboard links are HMAC-signed per tenant. |
+| **Guests seeing each other's data** | Each sender gets a tenant with a separate Pinecone namespace, Box folder, reminders, undo history and dashboard. |
+| **Leaked or forwarded email links** | Emails never carry the master key. Each link is a **signed, expiring, single-tenant token** (14 days; reminder links count from when they fire). The first click exchanges it for an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie and strips it from the URL. Redirects stay inside the tenant's own space. |
+| **Clickjacking / CSRF on the Undo buttons** | `X-Frame-Options: DENY` plus CSP `frame-ancestors 'none'`. Cross-site POSTs carry no session cookie. Also `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, HSTS, and a strict CSP. |
 | **Abuse of free credits** | Guests are capped at 15 runs and 2 Parallel Lives per day. |
 | **Leaked API keys** | There are none on the machine to leak. All credentials sit in Fly's connector vault. |
 | **"What if it gets tricked anyway?"** | Every state change is preceded by a checkpoint, so you can reply `undo`. |
@@ -146,7 +148,7 @@ You need a Fly.io account with Sprites, the `sprite` CLI (`curl -fsSL https://sp
    ./scripts/set_secret.sh CC_WEBHOOK_SECRET                   # optional: Svix signing secret
    ```
 7. **Webhook:** in the AgentMail console, add `https://<your-sprite-url>/webhooks/agentmail` for `message.received`.
-8. Email your inbox. The admin dashboard is `https://<your-sprite-url>/?k=<CC_DASH_KEY>` (the key is generated on first deploy).
+8. Email your inbox. Every reply links to your timeline. To sign in to the admin dashboard directly, run `./scripts/login_link.sh` for a fresh 14-day link.
 
 Useful commands:
 ```bash
@@ -180,6 +182,7 @@ agent/
 scripts/
   deploy.sh                  ship agent/ to the Sprite and (re)start the service
   set_secret.sh              set a setting/secret on the Sprite
+  login_link.sh              print a fresh signed dashboard link
   create_pinecone_index.sh   create the legacy integrated index
 ```
 

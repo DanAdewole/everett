@@ -161,9 +161,10 @@ def set_reminder(run: Run, due: str, text: str) -> dict:
     return {"ok": True, "reminder_id": rid, "when_local": local}
 
 
-def reminder_text(text: str, tenant: str) -> str:
+def reminder_text(text: str, tenant: str, due: datetime | None = None) -> str:
+    link = config.tenant_link(tenant, valid_from=due.timestamp() if due else None)  # still valid when it fires
     return (f"⏰ Reminder: {text}\n\n--\n{config.AGENT_NAME} · you asked me to remind you about this.\n"
-            f"Your timeline: {config.tenant_link(tenant)}")
+            f"Your timeline: {link}")
 
 
 def schedule_reminder(rid: int) -> None:
@@ -171,7 +172,8 @@ def schedule_reminder(rid: int) -> None:
     m = db.one("SELECT m.*, r.tenant FROM reminders m JOIN runs r ON r.id=m.run_id WHERE m.id=?", rid)
     try:
         send_at = datetime.fromisoformat(m["due_at"]).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        did = mail.schedule_reply(m["message_id"], reminder_text(m["text"], m["tenant"] or "owner"), send_at)
+        due = datetime.fromisoformat(m["due_at"])
+        did = mail.schedule_reply(m["message_id"], reminder_text(m["text"], m["tenant"] or "owner", due), send_at)
         db.ex("UPDATE reminders SET status='scheduled', draft_id=? WHERE id=?", did, rid)
     except Exception:
         log.exception("could not schedule reminder %s with AgentMail; /tick will send it", rid)

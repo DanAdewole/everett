@@ -47,8 +47,8 @@ def _local(iso: str | None) -> str:
 def _link(tenant: str | None, path: str) -> str:
     """tenant=None is the owner's admin view (sees everything)."""
     if tenant is None:
-        return f"{path}?k={html.escape(config.DASH_KEY)}"
-    return f"/u/{tenant}{path}?t={config.tenant_token(tenant)}"
+        return path  # auth is an HttpOnly session cookie now: no secrets in links
+    return f"/u/{tenant}{path}"
 
 
 def timeline_page(tenant: str | None = None) -> str:

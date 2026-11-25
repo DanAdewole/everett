@@ -144,7 +144,7 @@ def _block_spoof(full: dict, sender: str, evidence: str) -> None:
                   f"Someone just emailed me pretending to be you ({sender}), subject \"{subject[:80]}\".\n\n"
                   f"It failed email authentication ({evidence}), so I treated it as forged: I didn't read it "
                   f"as an instruction, didn't touch your memory, files or reminders, and didn't reply.\n\n"
-                  f"Nothing changed. It's logged on your timeline: {config.dash_link('/')}\n\n--\n{config.AGENT_NAME}")
+                  f"Nothing changed. It's logged on your timeline: {config.tenant_link('owner')}\n\n--\n{config.AGENT_NAME}")
     except Exception:
         log.exception("spoof alert failed")
 
