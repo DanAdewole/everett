@@ -19,7 +19,7 @@ def send_due() -> int:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for r in db.q("SELECT m.*, r.tenant FROM reminders m JOIN runs r ON r.id=m.run_id "
                       "WHERE m.status='pending' AND m.due_at <= ? ORDER BY m.due_at", now):
-            text = reminder_text(r["text"], r["tenant"] or "owner")
+            text = reminder_text(r["text"], r["tenant"] or "owner", None, r["context"] or "", r["link"] or "")
             try:
                 if r["message_id"]:
                     mail.reply(r["message_id"], text)

@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS timelines (
 );
 """
 )
-for _table, _col in (("runs", "tenant"), ("lives", "tenant"), ("reminders", "draft_id"), ("runs", "flags")):
+for _table, _col in (("runs", "tenant"), ("lives", "tenant"), ("reminders", "draft_id"), ("runs", "flags"),
+                     ("reminders", "context"), ("reminders", "link")):
     try:
         _conn.execute(f"ALTER TABLE {_table} ADD COLUMN {_col} TEXT")
     except sqlite3.OperationalError:

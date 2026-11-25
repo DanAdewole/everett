@@ -18,6 +18,8 @@ INLINE_TYPES = ("application/pdf", "image/png", "image/jpeg", "image/webp", "tex
 INLINE_MAX = 8 * 1024 * 1024
 
 UNDO_RE = re.compile(r"^\s*(undo|revert|roll ?back)\b", re.I)
+SNOOZE_RE = re.compile(r"^\s*(?:snooze|remind me again)\b[\s:,-]*(?:for\s+|until\s+|in\s+)?(.{0,40}?)[.!]*\s*$", re.I)
+DONE_RE = re.compile(r"^\s*(?:done|handled|paid|sorted|completed?|finished|all done|it'?s done)\s*[.!✅👍]*\s*$", re.I)
 CHOOSE_RE = re.compile(r"^\s*(?:choose|pick|go with|i choose|select)\s+(?:timeline\s+|option\s+)?([ab12])\b", re.I)
 
 SYSTEM = """You are {name}, a personal chief of staff that lives in its own computer (a Fly.io Sprite) and works over email.
@@ -28,7 +30,8 @@ Your job on every email:
    Make each fact self-contained with absolute dates. Skip fluff and things already in memory.
 2. File meaningful attachments with `file_attachment` (tidy folders, clear names). Skip logos/signature images.
 3. Create reminders with `set_reminder` for real deadlines (due dates, renewals, check-ins, RSVPs), usually a day or a few days before,
-   at 9:00 local time unless a time is obvious. Also when explicitly asked.
+   at 9:00 local time unless a time is obvious. Also when explicitly asked. Always give it `context`: the facts that
+   make the reminder useful on its own (amount, real deadline, who/where).
 4. Answer questions using `recall` (and the memories given below). If memory has nothing, say so honestly.
 5. If the user asks for help deciding between options ("help me decide", "should I X or Y"), call `start_parallel_lives`.
 
@@ -185,12 +188,72 @@ def handle_event(event: dict) -> None:
         first_line = body.strip().splitlines()[0] if body.strip() else ""
         if commands and UNDO_RE.match(first_line):
             return handle_undo(full, sender, tenant)
+        if commands and (SNOOZE_RE.match(first_line) or DONE_RE.match(first_line)):
+            target = tools.find_thread_reminder(full.get("thread_id") or "", tenant)
+            if target:
+                return handle_reminder_command(full, sender, tenant, target, first_line)
         if commands and CHOOSE_RE.match(first_line):
             from .lives import handle_choice
             return handle_choice(full, sender, CHOOSE_RE.match(first_line).group(1), tenant)
         run_agent(full, body, sender, commands, tenant)
     from .reminders import send_due
     send_due()
+
+
+def _snooze_until(arg: str, tz) -> datetime | None:
+    """'' -> 1 hour; '30m', '2 hours', '3 days', 'tomorrow', 'tonight', 'next week', 'monday'."""
+    from datetime import timedelta
+    now = datetime.now(tz)
+    arg = arg.strip().lower()
+    nine = lambda d: d.replace(hour=9, minute=0, second=0, microsecond=0)
+    if not arg:
+        return now + timedelta(hours=1)
+    m = re.fullmatch(r"(?:an?|one|(\d+(?:\.\d+)?))\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?)", arg)
+    if m:
+        n = float(m.group(1) or 1)
+        unit = m.group(2)[0]
+        return now + {"m": timedelta(minutes=n), "h": timedelta(hours=n), "d": timedelta(days=n),
+                      "w": timedelta(weeks=n)}[unit]
+    if arg in ("tomorrow", "tomorrow morning"):
+        return nine(now + timedelta(days=1))
+    if arg in ("tonight", "this evening"):
+        t = now.replace(hour=20, minute=0, second=0, microsecond=0)
+        return t if t > now else now + timedelta(hours=1)
+    if arg in ("next week", "a week"):
+        return nine(now + timedelta(days=7))
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    if arg.removeprefix("next ").removeprefix("on ") in days:
+        ahead = (days.index(arg.removeprefix("next ").removeprefix("on ")) - now.weekday() - 1) % 7 + 1
+        return nine(now + timedelta(days=ahead))
+    return None
+
+
+def handle_reminder_command(msg: dict, sender: str, tenant: str, rem, first_line: str) -> None:
+    """Replies to a reminder: 'done' closes it, 'snooze <when>' moves the scheduled AgentMail draft. No LLM needed."""
+    from .tools import fmt_local, tenant_tz
+    tz = tenant_tz(tenant)
+    snooze = SNOOZE_RE.match(first_line)
+    run_id = db.ex("INSERT INTO runs(created_at, message_id, thread_id, sender, subject, mode, status, tenant) "
+                   "VALUES (?,?,?,?,?,?,?,?)", db.now(), msg["message_id"], msg.get("thread_id"), sender,
+                   ("Snoozed: " if snooze else "Done: ") + rem["text"][:80],
+                   "owner" if tenant == "owner" else "guest", "done", tenant)
+    if snooze:
+        when = _snooze_until(snooze.group(1), tz)
+        if when is None:
+            db.ex("UPDATE runs SET status='error', error=? WHERE id=?", "couldn't parse snooze time", run_id)
+            mail.reply(msg["message_id"], f"I didn't catch when to snooze \"{rem['text']}\" until. Try \"snooze 2h\", "
+                       f"\"snooze tomorrow\" or \"snooze monday\"." + footer(tenant))
+            return
+        db.add_action(run_id, "reminder_snooze", f"Snoozed \"{rem['text'][:60]}\" to {fmt_local(when, tz)}",
+                      {"reminder_id": rem["id"], "old_due": rem["due_at"], "old_status": rem["status"]})
+        tools.move_reminder(rem["id"], when.astimezone(timezone.utc))
+        text = f"Snoozed ⏰ I'll remind you about \"{rem['text']}\" again {fmt_local(when, tz)}."
+    else:
+        db.add_action(run_id, "reminder_done", f"Marked done: {rem['text'][:60]}",
+                      {"reminder_id": rem["id"], "old_status": rem["status"]})
+        tools.complete_reminder(rem["id"])
+        text = f"Marked done ✅ \"{rem['text']}\". Nice work. I won't bring it up again."
+    mail.reply(msg["message_id"], text + footer(tenant, run_id))
 
 
 def run_agent(msg: dict, body: str, sender: str, owner: bool, tenant: str) -> None:
@@ -209,10 +272,22 @@ def run_agent(msg: dict, body: str, sender: str, owner: bool, tenant: str) -> No
                      "changed nothing.\n\n" + reply)
             db.ex("UPDATE runs SET flags=? WHERE id=?", "; ".join(run.flags), run.id)
             log.warning("run %s quarantined: %s", run.id, run.flags)
+        invites = tools.finalize_reminders(run)
         if run.done:
             reply += "\n\nWhat I did:\n" + "\n".join(f"- {d}" for d in run.done)
+        if invites:
+            reply += ("\n\n📅 Calendar invite attached" + (f"s ({len(invites)})" if len(invites) > 1 else "") +
+                      ". When a reminder arrives, reply \"done\" or \"snooze 1h\".")
         if owner:
-            mail.reply(run.message_id, reply.strip() + "\n" + footer(tenant, run.id if run.checkpoint else None))
+            text = reply.strip() + "\n" + footer(tenant, run.id if run.checkpoint else None)
+            try:
+                mail.reply(run.message_id, text, attachments=invites or None)
+            except Exception:
+                if not invites:
+                    raise
+                log.exception("reply with invites failed; sending without them")
+                mail.reply(run.message_id, text.replace("\n\n📅 Calendar invite attached", "\n\n📅 (Calendar invite "
+                           "unavailable)"))
         mail.label(run.message_id, ["processed"])
         db.ex("UPDATE runs SET status='done', reply=?, model=? WHERE id=?", reply, model, run.id)
         if run.lives_request:
@@ -221,6 +296,10 @@ def run_agent(msg: dict, body: str, sender: str, owner: bool, tenant: str) -> No
     except Exception as e:
         log.exception("run %s failed", run_id)
         db.ex("UPDATE runs SET status='error', error=? WHERE id=?", str(e)[:500], run_id)
+        try:
+            tools.finalize_reminders(run)  # reminders the run already set still get scheduled
+        except Exception:
+            log.exception("finalize reminders after failure")
         if owner:
             try:
                 mail.reply(run.message_id, "Sorry, I hit a snag processing this one: "
@@ -354,6 +433,14 @@ def undo_run(run_id: int) -> tuple[list[str], str | None]:
                 tools.unschedule_reminder(data["reminder_id"])
             elif a["kind"] == "reminder_cancel":
                 tools.schedule_reminder(data["reminder_id"])
+            elif a["kind"] == "reminder_snooze":
+                tools.move_reminder(data["reminder_id"], datetime.fromisoformat(data["old_due"]))
+            elif a["kind"] == "reminder_done":
+                rem = db.one("SELECT due_at FROM reminders WHERE id=?", data["reminder_id"])
+                if rem and rem["due_at"] > db.now():
+                    tools.schedule_reminder(data["reminder_id"])
+                else:
+                    db.ex("UPDATE reminders SET status=? WHERE id=?", data["old_status"], data["reminder_id"])
             elif a["kind"] == "timeline":
                 sprites.destroy(data["sprite_name"])
             db.ex("UPDATE actions SET undone=1 WHERE id=?", a["id"])

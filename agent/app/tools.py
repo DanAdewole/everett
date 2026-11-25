@@ -52,6 +52,7 @@ class Run:
     checkpoint: str | None = None
     lives_request: dict | None = None
     done: list[str] = field(default_factory=list)
+    new_reminders: list[int] = field(default_factory=list)  # scheduled at the end of the run (to include links)
     quarantined: bool = False          # set when the email tried to manipulate us: no state-changing tools
     flags: list[str] = field(default_factory=list)
 
@@ -139,45 +140,132 @@ def file_attachment(run: Run, attachment_index: int, folder: str, filename: str 
     return {"ok": True, "box_path": where, "url": up["url"]}
 
 
-def set_reminder(run: Run, due: str, text: str) -> dict:
+def _parse_due(due: str, tz) -> datetime | None:
     try:
         dt = datetime.fromisoformat(due)
     except ValueError:
+        return None
+    return (dt.replace(tzinfo=tz) if dt.tzinfo is None else dt).astimezone(timezone.utc)
+
+
+def set_reminder(run: Run, due: str, text: str, context: str = "") -> dict:
+    due_utc = _parse_due(due, run.tz)
+    if due_utc is None:
         return {"ok": False, "error": "due must be ISO 8601, e.g. 2026-12-01T09:00"}
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=run.tz)
-    due_utc = dt.astimezone(timezone.utc)
     if due_utc < datetime.now(timezone.utc):
         return {"ok": False, "error": "that time is in the past"}
     run.ensure_checkpoint()
-    rid = db.ex("INSERT INTO reminders(run_id, created_at, due_at, text, thread_id, message_id, recipient) "
-                "VALUES (?,?,?,?,?,?,?)", run.id, db.now(), due_utc.isoformat(timespec="seconds"), text,
-                run.thread_id, run.message_id, run.sender)
-    schedule_reminder(rid)
-    local = fmt_local(dt, run.tz)
+    rid = db.ex("INSERT INTO reminders(run_id, created_at, due_at, text, thread_id, message_id, recipient, context, "
+                "status) VALUES (?,?,?,?,?,?,?,?,?)", run.id, db.now(), due_utc.isoformat(timespec="seconds"), text,
+                run.thread_id, run.message_id, run.sender, context[:500], "new")
+    run.new_reminders.append(rid)
+    local = fmt_local(due_utc, run.tz)
     summary = f"Reminder set for {local}: {text[:80]}"
     db.add_action(run.id, "reminder", summary, {"reminder_id": rid})
     run.done.append(summary)
     return {"ok": True, "reminder_id": rid, "when_local": local}
 
 
-def reminder_text(text: str, tenant: str, due: datetime | None = None) -> str:
-    link = config.tenant_link(tenant, valid_from=due.timestamp() if due else None)  # still valid when it fires
-    return (f"⏰ Reminder: {text}\n\n--\n{config.AGENT_NAME} · you asked me to remind you about this.\n"
-            f"Your timeline: {link}")
+def finalize_reminders(run: Run) -> list[dict]:
+    """Schedule this run's new reminders (now that any Box filing has a link) and return .ics invites for them."""
+    if not run.new_reminders:
+        return []
+    box = db.one("SELECT data FROM actions WHERE run_id=? AND kind='box_file' AND undone=0 ORDER BY id DESC LIMIT 1",
+                 run.id)
+    link = json.loads(box["data"]).get("url", "") if box else ""
+    invites = []
+    for rid in run.new_reminders:
+        db.ex("UPDATE reminders SET link=? WHERE id=?", link, rid)
+        schedule_reminder(rid)
+        invites.append(ics_attachment(rid))
+    run.new_reminders = []
+    return invites
+
+
+def reminder_text(text: str, tenant: str, due: datetime | None = None, context: str = "", link: str = "") -> str:
+    url = config.tenant_link(tenant, valid_from=due.timestamp() if due else None)  # still valid when it fires
+    lines = [f"⏰ Reminder: {text}"]
+    if context:
+        lines.append(context)
+    if link:
+        lines.append(f"Filed here: {link}")
+    lines += ["", 'Reply "done" once it\'s handled, or "snooze 1h" / "snooze tomorrow" to push it back.',
+              "", "--", f"{config.AGENT_NAME} · you asked me to remind you about this.", f"Your timeline: {url}"]
+    return "\n".join(lines)
 
 
 def schedule_reminder(rid: int) -> None:
     """Hand the reminder to AgentMail as a scheduled reply draft; if that fails, leave it 'pending' for /tick."""
     m = db.one("SELECT m.*, r.tenant FROM reminders m JOIN runs r ON r.id=m.run_id WHERE m.id=?", rid)
     try:
-        send_at = datetime.fromisoformat(m["due_at"]).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         due = datetime.fromisoformat(m["due_at"])
-        did = mail.schedule_reply(m["message_id"], reminder_text(m["text"], m["tenant"] or "owner", due), send_at)
+        send_at = due.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = reminder_text(m["text"], m["tenant"] or "owner", due, m["context"] or "", m["link"] or "")
+        did = mail.schedule_reply(m["message_id"], body, send_at)
         db.ex("UPDATE reminders SET status='scheduled', draft_id=? WHERE id=?", did, rid)
     except Exception:
         log.exception("could not schedule reminder %s with AgentMail; /tick will send it", rid)
         db.ex("UPDATE reminders SET status='pending', draft_id=NULL WHERE id=?", rid)
+
+
+def _ics_escape(v: str) -> str:
+    return v.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _ics_fold(line: str) -> str:
+    out, b = [], line.encode()
+    while len(b) > 74:
+        cut = 74
+        while (b[cut] & 0xC0) == 0x80:  # don't split a UTF-8 character
+            cut -= 1
+        out.append(b[:cut].decode())
+        b = b[cut:]
+    out.append(b.decode())
+    return "\r\n ".join(out)
+
+
+def ics_attachment(rid: int) -> dict:
+    """A calendar invite so the reminder also lands in Google/Apple/Outlook calendar with one click."""
+    import base64
+    m = db.one("SELECT * FROM reminders WHERE id=?", rid)
+    due = datetime.fromisoformat(m["due_at"]).astimezone(timezone.utc)
+    stamp = lambda d: d.strftime("%Y%m%dT%H%M%SZ")
+    desc = "\n".join(x for x in (m["context"], f"Filed: {m['link']}" if m["link"] else "",
+                                  f"Set by {config.AGENT_NAME} ({config.INBOX})") if x)
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:-//{config.AGENT_NAME}//Reminders//EN", "METHOD:PUBLISH",
+             "BEGIN:VEVENT", f"UID:reminder-{rid}-{m['created_at'][:10]}@{config.INBOX.split('@')[-1]}",
+             f"DTSTAMP:{stamp(datetime.now(timezone.utc))}", f"DTSTART:{stamp(due)}", "DURATION:PT15M",
+             f"SUMMARY:{_ics_escape('⏰ ' + m['text'][:120])}", f"DESCRIPTION:{_ics_escape(desc)}",
+             "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:PT0M", f"DESCRIPTION:{_ics_escape(m['text'][:120])}",
+             "END:VALARM", "END:VEVENT", "END:VCALENDAR"]
+    data = "\r\n".join(_ics_fold(x) for x in lines) + "\r\n"
+    return {"filename": f"reminder-{rid}.ics", "content_type": "text/calendar; charset=utf-8; method=PUBLISH",
+            "content": base64.b64encode(data.encode()).decode()}
+
+
+# ---- reply commands on a reminder thread: "done", "snooze 2h", "snooze tomorrow"
+def find_thread_reminder(thread_id: str, tenant: str):
+    """The reminder this reply is about: the latest one that already fired in this thread, else the next one due."""
+    now = db.now()
+    base = ("SELECT m.* FROM reminders m JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? AND r.tenant=? "
+            "AND m.status IN ('scheduled','pending','sent') ")
+    return (db.one(base + "AND m.due_at <= ? ORDER BY m.due_at DESC LIMIT 1", thread_id, tenant, now)
+            or db.one(base + "AND m.due_at > ? ORDER BY m.due_at LIMIT 1", thread_id, tenant, now))
+
+
+def move_reminder(rid: int, new_due_utc: datetime) -> None:
+    m = db.one("SELECT * FROM reminders WHERE id=?", rid)
+    if m["draft_id"]:
+        mail.delete_draft(m["draft_id"])  # False if AgentMail already sent it: fine
+    db.ex("UPDATE reminders SET due_at=?, draft_id=NULL WHERE id=?", new_due_utc.isoformat(timespec="seconds"), rid)
+    schedule_reminder(rid)
+
+
+def complete_reminder(rid: int) -> None:
+    m = db.one("SELECT * FROM reminders WHERE id=?", rid)
+    if m["draft_id"] and m["due_at"] > db.now():
+        mail.delete_draft(m["draft_id"])
+    db.ex("UPDATE reminders SET status='done' WHERE id=?", rid)
 
 
 def unschedule_reminder(rid: int) -> None:
@@ -291,8 +379,12 @@ DECLARATIONS = [
          "attachment_index": {"type": "integer"}, "folder": {"type": "string"},
          "filename": {"type": "string"}}, "required": ["attachment_index", "folder"]}},
     {"name": "set_reminder",
-     "description": "Schedule an email reminder. 'due' is ISO 8601 local time (user timezone), e.g. 2026-12-01T09:00.",
-     "parameters": {"type": "object", "properties": {"due": {"type": "string"}, "text": {"type": "string"}},
+     "description": "Schedule an email reminder. 'due' is ISO 8601 local time (user timezone), e.g. 2026-12-01T09:00. "
+                    "'text' is a short title. 'context' is one or two self-contained lines that make the reminder "
+                    "useful on its own: what, how much, the real deadline, who/where (e.g. 'East Repair invoice "
+                    "US-001: $154.06 due Feb 26 2027, pay via the link in their email').",
+     "parameters": {"type": "object", "properties": {"due": {"type": "string"}, "text": {"type": "string"},
+                                                    "context": {"type": "string"}},
                     "required": ["due", "text"]}},
     {"name": "set_timezone",
      "description": "Save the user's timezone when they mention where they are or their timezone (e.g. 'I'm in "

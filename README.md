@@ -19,10 +19,11 @@ Named after Hugh Everett, the physicist behind the many-worlds interpretation.
 | You email… | Everett… |
 |---|---|
 | A bill, lease, receipt or ticket (PDF or photo) | reads it, files it to **Box** under a tidy folder (`Finance/Receipts/…`), and remembers the amount, dates and names in **Pinecone** |
-| "Remind me 3 days before it's due" | schedules the reminder as an **AgentMail** scheduled reply. It arrives in the same thread on time, even while the Sprite is asleep |
+| "Remind me 3 days before it's due" | schedules the reminder as an **AgentMail** scheduled reply, with the amount, the real deadline and the Box link inside, and attaches a **calendar invite** (`.ics`). The reminder arrives in the same thread on time, even while the Sprite is asleep |
+| `done` / `snooze 2h` / `snooze tomorrow` (replying to a reminder) | closes the reminder, or moves the scheduled email to the new time. Handled instantly, without a model call, and undoable |
 | "How much was the bike repair?" | answers from long-term memory |
 | `undo` | reverses the last run's side effects, then **restores the whole Sprite to the checkpoint taken just before it** |
-| "Help me decide: remote job in Lagos or a master's in Toronto?" | **Parallel Lives**: one new Sprite per option, each lives a year of that future, you get a letter from each timeline plus a comparison |
+| "Help me decide: should I spend Thanksgiving week building a hackathon project, or with my family?" | **Parallel Lives**: one new Sprite per option, each lives a year of that future, you get a letter from each timeline plus a comparison |
 | `choose B` | collapses the other timeline (its Sprite is destroyed), remembers the decision, sends first steps |
 | Someone emails you and CCs Everett | **observe mode**: quietly takes notes for you (marked *unverified*), never replies to them |
 
@@ -143,7 +144,7 @@ You need a Fly.io account with Sprites, the `sprite` CLI (`curl -fsSL https://sp
 6. **Settings** (stored on the Sprite in `~/.cc-secrets/env`, never in the repo):
    ```bash
    ./scripts/set_secret.sh CC_OWNER_EMAILS "you@example.com"   # who the owner is
-   ./scripts/set_secret.sh CC_TIMEZONE Africa/Lagos            # owner's default timezone
+   ./scripts/set_secret.sh CC_TIMEZONE America/New_York        # owner's default timezone
    ./scripts/set_secret.sh SPRITES_TOKEN                       # for Parallel Lives (prompts, hidden)
    ./scripts/set_secret.sh CC_WEBHOOK_SECRET                   # optional: Svix signing secret
    ```
