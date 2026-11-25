@@ -35,7 +35,14 @@ def http(method, url, body=None, headers=None, timeout=120):
 
 def gateways():
     conns = http("GET", "https://api.sprites.dev/v1/gateway/list")["connections"]
-    return {c["provider"]: c["gateway_base_url"] for c in conns}
+    gw = {c["provider"]: c["gateway_base_url"] for c in conns}
+    for c in conns:
+        # The Fly ElevenLabs connector only covers voice agents; text-to-speech goes through a Custom API
+        # connector named "...ElevenLabs..." (base https://api.elevenlabs.io, header xi-api-key).
+        label = " ".join(str(c.get(k) or "") for k in ("display_name", "description", "provider_account_name"))
+        if c["provider"] == "custom_api" and "elevenlabs" in label.lower():
+            gw["elevenlabs_tts"] = c["gateway_base_url"]
+    return gw
 
 
 SCHEMA = {
@@ -107,9 +114,9 @@ def _wav(pcm: bytes, rate: int = 24000) -> bytes:
 
 def speak_eleven(script: str, label: str, gw) -> bytes | None:
     """ElevenLabs (if its connector is attached): the most human-sounding option. Returns MP3 bytes."""
-    if "elevenlabs" not in gw:
+    if "elevenlabs_tts" not in gw:
         return None
-    url = (f"{gw['elevenlabs']}/v1/text-to-speech/{ELEVEN_VOICES.get(label, ELEVEN_VOICES['A'])}"
+    url = (f"{gw['elevenlabs_tts']}/v1/text-to-speech/{ELEVEN_VOICES.get(label, ELEVEN_VOICES['A'])}"
            f"?output_format=mp3_44100_64")
     req = urllib.request.Request(url, method="POST", data=json.dumps({
         "text": script, "model_id": "eleven_multilingual_v2",
