@@ -74,6 +74,7 @@ def timeline_page(tenant: str | None = None) -> str:
             f"<div style='margin-top:6px'><span class='pill {e(r['status'] or '')}'>{e(r['status'] or '')}</span>{cp}"
             f"{'<span class=pill>' + e(r['model']) + '</span>' if r['model'] else ''}</div></div>{btn}</div>"
             f"{'<div class=meta>' + ('⚠️ failed authentication: ' if r['status'] == 'blocked' else '⏪ ') + e(r['error']) + '</div>' if r['status'] in ('blocked', 'undone') and r['error'] else ''}"
+            f"{'<div class=meta>🛡️ quarantined: ' + e(r['flags']) + '</div>' if r['flags'] else ''}"
             f"{'<ul>' + items + '</ul>' if items else ''}</div>")
     cps = checkpoint_list()
     cp_items = "".join(f"<li><b>{e(c['id'])}</b> · {_local(c.get('create_time'))}<br><span class=meta>"
