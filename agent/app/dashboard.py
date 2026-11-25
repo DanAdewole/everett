@@ -21,6 +21,15 @@ ul{margin:8px 0 0;padding-left:18px}li.undone{text-decoration:line-through;color
 button{background:var(--accent);color:#fff;border:0;border-radius:9px;padding:7px 12px;font-weight:600;cursor:pointer}button:hover{filter:brightness(1.1)}
 .banner{background:var(--card);border:1px solid var(--accent);border-radius:12px;padding:10px 14px;margin-top:16px}
 .cps li{font-size:13px;margin-bottom:4px}.tl{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.tm{overflow-x:auto;padding:4px 2px 2px;-webkit-overflow-scrolling:touch}.track{display:flex;min-width:max-content}
+.node{flex:0 0 170px;position:relative;padding:28px 14px 4px 0}
+.node:before{content:"";position:absolute;top:10px;left:0;right:0;height:2px;background:var(--line)}
+.node:first-child:before{left:12px}.node.now:before{right:auto;width:14px}
+.dot{position:absolute;top:2px;left:4px;width:18px;height:18px;border-radius:50%;background:var(--accent);border:3px solid var(--card);box-shadow:0 0 0 1px var(--line)}
+.node.undone .dot{background:var(--warn)}.node.undone .c{text-decoration:line-through;color:var(--mute)}
+.node.rewind .dot{background:var(--warn);border-radius:4px}.node.rewind .v{color:var(--warn)}
+.node.now .dot{background:var(--ok);animation:pulse 2s infinite}@keyframes pulse{50%{box-shadow:0 0 0 6px transparent,0 0 0 1px var(--line)}}
+.node .v{font-weight:700;font-size:14px}.node .t{font-size:12px;color:var(--mute)}.node .c{font-size:13px;margin-top:2px}
 pre{white-space:pre-wrap;font:inherit;margin:8px 0 0}.score{font-size:13px;color:var(--mute)}a{color:var(--accent)}
 """
 
@@ -51,6 +60,48 @@ def _link(tenant: str | None, path: str) -> str:
     return f"/u/{tenant}{path}"
 
 
+def _ts(iso: str | None) -> datetime:
+    """Parse ISO times, including the nanosecond ones `sprite-env` prints."""
+    import re
+    iso = (iso or "1970-01-01T00:00:00+00:00").replace("Z", "+00:00")
+    iso = re.sub(r"(\.\d{6})\d+", r"\1", iso)
+    try:
+        return datetime.fromisoformat(iso)
+    except ValueError:
+        return datetime.fromisoformat("1970-01-01T00:00:00+00:00")
+
+
+def _time_machine(tenant: str | None) -> str:
+    """Checkpoints as a track you can read left to right: each one protected a run; rewinds jump back."""
+    import re
+    e = html.escape
+    runs = {r["checkpoint"]: r for r in db.q("SELECT * FROM runs WHERE checkpoint IS NOT NULL AND checkpoint != '' "
+                                             "AND (? IS NULL OR tenant=?)", tenant, tenant)}
+    events = []
+    for c in checkpoint_list():
+        r = runs.get(c["id"])
+        comment = c.get("comment") or ""
+        if r is None and (tenant is not None or comment.startswith("pre-restore")):
+            continue  # guests only see their own history; pre-restore snapshots are plumbing
+        label = (f"before #{r['id']} · {r['subject'] or ''}" if r else comment) or "checkpoint"
+        undone = bool(r and r["status"] == "undone")
+        events.append((_ts(c.get("create_time")), "undone" if undone else "", c["id"], label[:60]))
+    for x in db.q("SELECT * FROM restores WHERE (? IS NULL OR tenant=?)", tenant, tenant):
+        events.append((_ts(x["at"]), "rewind", f"⏪ {x['version']}",
+                       f"undo of #{x['run_id']}: rewound the whole computer to {x['version']}"))
+    if not events:
+        return ""
+    events.sort(key=lambda ev: ev[0])
+    nodes = "".join(f"<div class='node {cls}'><span class=dot></span><div class=v>{e(v)}</div>"
+                    f"<div class=t>{_local(t.isoformat())}</div><div class=c>{e(lbl)}</div></div>"
+                    for t, cls, v, lbl in events[-14:])
+    nodes += "<div class='node now'><span class=dot></span><div class=v>now</div><div class=c>live</div></div>"
+    return (f"<h2>Time machine</h2><div class=card><div class=tm><div class=track>{nodes}</div></div>"
+            f"<div class=meta style='margin-top:8px'>Every dot is a full snapshot of this computer, taken before "
+            f"an action. ⏪ marks a moment it was rewound. Struck-through runs were undone.</div></div>"
+            "<script>document.querySelectorAll('.tm').forEach(t=>t.scrollLeft=t.scrollWidth)</script>")
+
+
 def timeline_page(tenant: str | None = None) -> str:
     e = html.escape
     _view.tz = tenant_tz(tenant)
@@ -76,9 +127,6 @@ def timeline_page(tenant: str | None = None) -> str:
             f"{'<div class=meta>' + ('⚠️ failed authentication: ' if r['status'] == 'blocked' else '⏪ ') + e(r['error']) + '</div>' if r['status'] in ('blocked', 'undone') and r['error'] else ''}"
             f"{'<div class=meta>🛡️ quarantined: ' + e(r['flags']) + '</div>' if r['flags'] else ''}"
             f"{'<ul>' + items + '</ul>' if items else ''}</div>")
-    cps = checkpoint_list()
-    cp_items = "".join(f"<li><b>{e(c['id'])}</b> · {_local(c.get('create_time'))}<br><span class=meta>"
-                       f"{e(c.get('comment') or '')}</span></li>" for c in cps[:25])
     rems = db.q(f"SELECT m.* FROM reminders m JOIN runs r ON r.id=m.run_id WHERE {db.UPCOMING} "
                 "AND (? IS NULL OR r.tenant=?) ORDER BY m.due_at LIMIT 15", tenant, tenant)
     rem_items = "".join(f"<li>{_local(r['due_at'])}: {e(r['text'])}</li>" for r in rems) or "<li class=meta>none</li>"
@@ -89,9 +137,9 @@ def timeline_page(tenant: str | None = None) -> str:
     body = f"""
 <h1>{e(config.AGENT_NAME)}'s timeline{'' if tenant is None or tenant == 'owner' else ' (your private space)'}</h1>
 <p class=sub>Email <b>{e(config.INBOX)}</b>. Every action is preceded by a checkpoint of this whole computer. Undo rewinds it.</p>
+{_time_machine(tenant)}
 <div class=grid><section><h2>Runs</h2>{''.join(cards) or '<div class=card>No emails yet.</div>'}</section>
-<aside><h2>Checkpoints (time machine)</h2><div class=card><ul class=cps>{cp_items or '<li>none</li>'}</ul></div>
-<h2>Upcoming reminders</h2><div class=card><ul>{rem_items}</ul></div>
+<aside><h2>Upcoming reminders</h2><div class=card><ul>{rem_items}</ul></div>
 <h2>Parallel lives</h2><div class=card><ul>{life_items}</ul></div></aside></div>"""
     return _page(f"{config.AGENT_NAME} timeline", body)
 
@@ -111,7 +159,8 @@ def life_page(life_id: int, tenant: str | None = None) -> str:
 <h3 style='margin:8px 0 2px'>Timeline {e(t['label'])}: {e(t['option'])}</h3><div class=meta>{e(rep.get('headline', t['error'] or ''))}</div>
 <p class=score>Happiness {rep.get('happiness', '–')}/10 · Growth {rep.get('growth', '–')}/10 · Money {rep.get('financial_health', '–')}/10</p>
 <b>One year later</b><pre>{e(rep.get('diary', ''))}</pre><b>Monthly budget</b><ul>{budget}</ul>
-<b>Letter from this future</b><pre>{e(rep.get('letter', ''))}</pre></div>""")
+<b>Letter from this future</b><pre>{e(rep.get('letter', ''))}</pre>
+{('<b>🎧 Voicemail (' + e(rep.get('mood', '')) + ')</b><pre>' + e(rep['voicemail']) + '</pre>') if rep.get('voicemail') else ''}</div>""")
     body = (f"<p><a href='{_link(tenant, '/')}'>← timeline</a></p><h1>{e(life['question'])}</h1>"
             f"<p class=sub>{e(life['status'])} · {_local(life['created_at'])}</p><div class=tl>{''.join(cols)}</div>"
             f"<h2>Verdict</h2><div class=card><pre>{e(life['summary'] or 'still living…')}</pre></div>")

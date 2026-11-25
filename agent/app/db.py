@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS lives (
   run_id INTEGER, created_at TEXT, question TEXT, status TEXT, thread_id TEXT, message_id TEXT,
   recipient TEXT, summary TEXT, chosen TEXT
 );
+CREATE TABLE IF NOT EXISTS restores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, version TEXT, run_id INTEGER, tenant TEXT
+);
 CREATE TABLE IF NOT EXISTS prefs (
   tenant TEXT PRIMARY KEY, tz TEXT
 );

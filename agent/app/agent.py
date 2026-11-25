@@ -20,6 +20,7 @@ INLINE_MAX = 8 * 1024 * 1024
 UNDO_RE = re.compile(r"^\s*(undo|revert|roll ?back)\b", re.I)
 SNOOZE_RE = re.compile(r"^\s*(?:snooze|remind me again)\b[\s:,-]*(?:for\s+|until\s+|in\s+)?(.{0,40}?)[.!]*\s*$", re.I)
 DONE_RE = re.compile(r"^\s*(?:done|handled|paid|sorted|completed?|finished|all done|it'?s done)\s*[.!✅👍]*\s*$", re.I)
+FORGET_RE = re.compile(r"^\s*(?:forget me|delete (?:all )?my data|erase me|wipe my data)\s*[.!]*\s*$", re.I)
 CHOOSE_RE = re.compile(r"^\s*(?:choose|pick|go with|i choose|select)\s+(?:timeline\s+|option\s+)?([ab12])\b", re.I)
 
 SYSTEM = """You are {name}, a personal chief of staff that lives in its own computer (a Fly.io Sprite) and works over email.
@@ -188,6 +189,8 @@ def handle_event(event: dict) -> None:
         first_line = body.strip().splitlines()[0] if body.strip() else ""
         if commands and UNDO_RE.match(first_line):
             return handle_undo(full, sender, tenant)
+        if commands and FORGET_RE.match(first_line):
+            return handle_forget(full, sender, tenant)
         if commands and (SNOOZE_RE.match(first_line) or DONE_RE.match(first_line)):
             target = tools.find_thread_reminder(full.get("thread_id") or "", tenant)
             if target:
@@ -226,6 +229,63 @@ def _snooze_until(arg: str, tz) -> datetime | None:
         ahead = (days.index(arg.removeprefix("next ").removeprefix("on ")) - now.weekday() - 1) % 7 + 1
         return nine(now + timedelta(days=ahead))
     return None
+
+
+def handle_forget(msg: dict, sender: str, tenant: str) -> None:
+    """'forget me': a guest wipes everything Everett holds about them. Deliberately NOT undoable."""
+    from .gw import box
+    from .sprite import sprites
+    if tenant == "owner":
+        mail.reply(msg["message_id"], "For safety I won't wipe the owner's space from an email. That has to be done "
+                   "on the Sprite itself." + footer(tenant))
+        return
+    wiped = []
+    try:
+        memory.wipe(f"mem-{tenant}")
+        wiped.append("your long-term memory")
+    except Exception:
+        log.exception("forget: memory wipe")
+    rems = db.q("SELECT m.* FROM reminders m JOIN runs r ON r.id=m.run_id WHERE r.tenant=?", tenant)
+    for m in rems:
+        if m["draft_id"] and m["due_at"] > db.now():
+            try:
+                mail.delete_draft(m["draft_id"])
+            except Exception:
+                log.exception("forget: draft")
+    if rems:
+        wiped.append(f"{len(rems)} reminder(s)")
+    files = db.q("SELECT a.data FROM actions a JOIN runs r ON r.id=a.run_id WHERE r.tenant=? AND a.kind='box_file' "
+                 "AND a.undone=0", tenant)
+    for f in files:
+        d = json.loads(f["data"])
+        try:  # the Box connector can't delete, so each file is replaced by a note (see Box.retire_file)
+            box.retire_file(d["file_id"], d.get("name") or d["path"].rsplit("/", 1)[-1],
+                            f"Deleted at the owner's request ('forget me', {datetime.now(timezone.utc):%Y-%m-%d}).")
+        except Exception:
+            log.exception("forget: box")
+        if d.get("local"):
+            Path(d["local"]).unlink(missing_ok=True)
+    if files:
+        wiped.append(f"{len(files)} filed document(s)")
+    for t in db.q("SELECT t.sprite_name FROM timelines t JOIN lives l ON l.id=t.life_id WHERE l.tenant=? AND "
+                  "t.status IN ('creating','living','reported','chosen')", tenant):
+        try:
+            sprites.destroy(t["sprite_name"])
+        except Exception:
+            log.exception("forget: sprite")
+    run_ids = [r["id"] for r in db.q("SELECT id FROM runs WHERE tenant=?", tenant)]
+    for rid in run_ids:
+        db.ex("DELETE FROM actions WHERE run_id=?", rid)
+        db.ex("DELETE FROM reminders WHERE run_id=?", rid)
+    for lid in [r["id"] for r in db.q("SELECT id FROM lives WHERE tenant=?", tenant)]:
+        db.ex("DELETE FROM timelines WHERE life_id=?", lid)
+    for table in ("lives", "runs", "restores", "prefs"):
+        db.ex(f"DELETE FROM {table} WHERE tenant=?", tenant)
+    wiped.append("your timeline and history")
+    log.info("forgot tenant %s (%d runs)", tenant, len(run_ids))
+    mail.reply(msg["message_id"], "Done. I've forgotten you. 🫥\n\nI deleted " + ", ".join(wiped) + ". Your private "
+               "timeline link no longer shows anything. This can't be undone, by design.\n\nIf you write to me again, "
+               f"you'll start fresh.\n\n--\n{config.AGENT_NAME}")
 
 
 def handle_reminder_command(msg: dict, sender: str, tenant: str, rem, first_line: str) -> None:
@@ -457,6 +517,8 @@ def undo_run(run_id: int) -> tuple[list[str], str | None]:
         restore = None
     if restore:
         db.ex("UPDATE runs SET error=? WHERE id=?", f"rewound disk to checkpoint {restore}", run_id)
+        db.ex("INSERT INTO restores(at, version, run_id, tenant) VALUES (?,?,?,?)", db.now(), restore, run_id,
+              run["tenant"])
     return undone, restore
 
 

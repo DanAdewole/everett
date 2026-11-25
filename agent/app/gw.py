@@ -210,6 +210,11 @@ class Memory:
         if ids:
             _check(http.post(self._u("/vectors/delete"), json={"namespace": ns, "ids": ids}))
 
+    def wipe(self, ns: str) -> None:
+        r = http.post(self._u("/vectors/delete"), json={"namespace": ns, "deleteAll": True})
+        if r.status_code != 404:  # an empty namespace is already wiped
+            _check(r)
+
 
 memory = Memory()
 
