@@ -1,4 +1,5 @@
 """HTTP surface of the Sprite: AgentMail webhook, timeline dashboard, undo buttons, reminder tick."""
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -13,8 +14,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from . import config, db
 from .agent import RUN_LOCK, handle_event, undo_run
 from .dashboard import life_page, timeline_page
+from .landing import landing_page
 from .reminders import send_due
-from .sprite import checkpoint_restore, keep_awake
+from .sprite import awake_begin, checkpoint_restore, keep_awake
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("cc.main")
@@ -89,8 +91,8 @@ def go(t: str = "", next: str = "/"):
     return _signed_in(RedirectResponse(dest, status_code=303), tenant)
 
 
-def _work(event: dict) -> None:
-    with keep_awake(20):
+def _work(event: dict, task: str) -> None:
+    with keep_awake(20, name=task):
         try:
             handle_event(event)
         except Exception:
@@ -107,8 +109,10 @@ async def agentmail_webhook(request: Request):
         return {"ok": True, "ignored": event.get("event_type")}
     if not db.claim(f"evt:{event.get('event_id')}"):
         return {"ok": True, "duplicate": True}
-    # Ack fast (AgentMail retries slow webhooks); a keep-awake task stops the Sprite sleeping mid-work.
-    threading.Thread(target=_work, args=(event,), daemon=True).start()
+    # Take the keep-awake task BEFORE acking: a Sprite that was just woken by this request could otherwise fall
+    # back asleep in the gap between our 200 and the background thread starting (seen: a 37 s cold-start stall).
+    task = await asyncio.to_thread(awake_begin, 20)
+    threading.Thread(target=_work, args=(event, task), daemon=True).start()
     return {"ok": True}
 
 
@@ -132,7 +136,7 @@ def home(request: Request):
             return _signed_in(RedirectResponse("/", status_code=303), "owner")
         return _denied()
     if not _owner(request):
-        return HTMLResponse(f"<h1>{config.AGENT_NAME}</h1><p>Email me: {config.INBOX}</p>", status_code=200)
+        return HTMLResponse(landing_page())
     return timeline_page()
 
 

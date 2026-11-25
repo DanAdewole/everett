@@ -43,18 +43,29 @@ def checkpoint_restore(version: str) -> None:
 
 
 # ---------------------------------------------------------------- self: keep awake while working
-@contextlib.contextmanager
-def keep_awake(minutes: int = 15):
+def awake_begin(minutes: int = 15) -> str:
+    """Ask the Sprite not to sleep (a task with an expiry, so a crash can't keep it awake forever)."""
     name = f"work-{uuid.uuid4().hex[:8]}"
     try:
         _sock.post("/v1/tasks", json={"name": name, "expire": f"{minutes}m"})
     except Exception as e:
         log.warning("keep-awake task failed: %s", e)
+    return name
+
+
+def awake_end(name: str) -> None:
+    with contextlib.suppress(Exception):
+        _sock.delete(f"/v1/tasks/{name}")
+
+
+@contextlib.contextmanager
+def keep_awake(minutes: int = 15, name: str | None = None):
+    """Stay awake for the block. Pass `name` to adopt a task that was already started (see the webhook)."""
+    name = name or awake_begin(minutes)
     try:
         yield
     finally:
-        with contextlib.suppress(Exception):
-            _sock.delete(f"/v1/tasks/{name}")
+        awake_end(name)
 
 
 # ---------------------------------------------------------------- siblings: Sprites REST API
