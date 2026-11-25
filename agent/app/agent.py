@@ -268,7 +268,7 @@ def handle_forget(msg: dict, sender: str, tenant: str) -> None:
     if files:
         wiped.append(f"{len(files)} filed document(s)")
     for t in db.q("SELECT t.sprite_name FROM timelines t JOIN lives l ON l.id=t.life_id WHERE l.tenant=? AND "
-                  "t.status IN ('creating','living','reported','chosen')", tenant):
+                  "t.status IN ('creating','living','reported','chosen','failed')", tenant):
         try:
             sprites.destroy(t["sprite_name"])
         except Exception:

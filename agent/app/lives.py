@@ -23,7 +23,8 @@ def start_lives(run: Run, msg: dict) -> None:
 
 
 def _alive_timelines() -> list:
-    return db.q("SELECT * FROM timelines WHERE status IN ('creating','living','reported','chosen')")
+    # 'failed' too: a timeline that collapsed still has a Sprite occupying one of the plan's slots.
+    return db.q("SELECT * FROM timelines WHERE status IN ('creating','living','reported','chosen','failed')")
 
 
 def _orchestrate(run: Run, msg: dict, req: dict) -> None:
