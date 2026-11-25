@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -58,8 +59,18 @@ def _orchestrate(run: Run, msg: dict, req: dict) -> None:
             th = threading.Thread(target=_live_one, args=(tid, name, brief, results), daemon=True)
             th.start()
             threads.append(th)
+            time.sleep(8)  # stagger: two timelines hitting the model in the same second trips rate limits
         for th in threads:
             th.join(timeout=900)
+        # A timeline that collapsed (usually a busy model) gets one more life on its own Sprite.
+        for t in db.q("SELECT * FROM timelines WHERE life_id=? AND status='failed'", life_id):
+            log.info("retrying timeline %s", t["sprite_name"])
+            time.sleep(20)
+            brief = {"question": req["question"], "option": t["option"], "label": t["label"],
+                     "others": [o for o in opts if o != t["option"]], "context": req.get("context", ""),
+                     "today": datetime.now(TZ).strftime("%B %d, %Y"), "recipient": run.sender,
+                     "inbox": config.INBOX}
+            _live_one(t["id"], t["sprite_name"], brief, results)
 
         rows = db.q("SELECT * FROM timelines WHERE life_id=? ORDER BY label", life_id)
         reports = [(r, json.loads(r["report"])) for r in rows if r["report"]]
@@ -68,7 +79,7 @@ def _orchestrate(run: Run, msg: dict, req: dict) -> None:
             mail.reply(run.message_id, "Both timelines collapsed before reporting back (the AI model was overloaded). "
                        "Try me again in a few minutes.")
             return
-        summary = _compare(req, reports)
+        summary = _compare(req, reports, len(rows))
         db.ex("UPDATE lives SET status='reported', summary=? WHERE id=?", summary, life_id)
         mail.reply(run.message_id, summary + f"\n\n--\n{config.AGENT_NAME} · "
                    f"{config.tenant_link(run.tenant, f'/lives/{life_id}')}")
@@ -95,7 +106,7 @@ def _budget(rep: dict) -> float:
     return sum(float(b.get("usd") or 0) for b in rep.get("monthly_budget", []))
 
 
-def _compare(req: dict, reports: list) -> str:
+def _compare(req: dict, reports: list, total: int) -> str:
     blocks = []
     for row, rep in reports:
         blocks.append(
@@ -115,8 +126,10 @@ def _compare(req: dict, reports: list) -> str:
     except Exception:
         verdict = "I couldn't reach the model for a verdict, but the numbers above tell the story."
     letters = "You should also have a letter from each timeline in your inbox: written from inside that future."
-    return (f"I split reality {len(reports)} ways for \"{req['question']}\". Each option got its own computer "
-            f"that lived one year of that future.\n\n{raw}\n\nMy take: {verdict.strip()}\n\n{letters}\n\n"
+    lost = (f"\n\n(One timeline collapsed before it could report back: the AI model was out of capacity. Ask me "
+            f"again later to re-run it.)" if len(reports) < total else "")
+    return (f"I split reality {total} ways for \"{req['question']}\". Each option got its own computer "
+            f"that lived one year of that future.\n\n{raw}{lost}\n\nMy take: {verdict.strip()}\n\n{letters}\n\n"
             f"Reply \"choose A\" or \"choose B\" and I'll collapse the other timeline (its Sprite gets destroyed) "
             f"and send you the first steps for the life you picked.")
 

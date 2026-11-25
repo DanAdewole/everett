@@ -227,9 +227,18 @@ _benched: dict[str, float] = {}
 BENCH_SECONDS = 600
 
 
-def _bench(model: str, why: str) -> None:
-    _benched[model] = time.time() + BENCH_SECONDS
-    log.warning("gemini %s benched for %ds (%s)", model, BENCH_SECONDS, why[:80])
+def _bench(model: str, why: str, seconds: float = BENCH_SECONDS) -> None:
+    _benched[model] = time.time() + seconds
+    log.warning("gemini %s benched for %ds (%s)", model, seconds, why[:80])
+
+
+def _quota_bench_seconds(r: httpx.Response) -> float:
+    """429s come in two kinds: per-minute (wait it out) and per-day (this model is done until the quota resets,
+    so stop spending calls on it). Gemini says which, and when it resets."""
+    import re
+    m = re.search(r'"retryDelay":\s*"(\d+)', r.text)
+    delay = float(m.group(1)) if m else 60
+    return delay if "PerDay" in r.text else max(delay, 30)
 
 
 def _strip_signatures(contents: list[dict]) -> list[dict]:
@@ -279,7 +288,9 @@ def gemini(contents: list[dict], system: str, tools: list[dict] | None = None,
                 last = f"{m}: empty candidates {str(data)[:200]}"
                 continue
             last = f"{m}: {r.status_code} {r.text[:200]}"
-            if r.status_code in (429, 503, 504):
+            if r.status_code == 429:
+                _bench(m, "daily quota used up" if "PerDay" in r.text else "rate limited", _quota_bench_seconds(r))
+            elif r.status_code in (503, 504):
                 _bench(m, f"HTTP {r.status_code}")
             if r.status_code not in RETRYABLE and r.status_code != 404:
                 log.warning("gemini non-retryable %s", last)
