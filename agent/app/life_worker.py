@@ -20,8 +20,8 @@ MODELS = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash', 'gem
 TTS_MODELS = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview",
               "gemini-2.5-flash-preview-tts"]
 VOICES = {"A": "Charon", "B": "Kore", "C": "Puck"}  # Gemini voices: each future sounds different
-# ElevenLabs premade voices (usable on the free plan): George, Sarah, Brian
-ELEVEN_VOICES = {"A": "JBFqnCBsd6RMkjVDRZzb", "B": "EXAVITQu4vr4xnAvoGeH", "C": "nPczCjzI2devNBz1zQrb"}
+# ElevenLabs default voices that the free plan may use over the API (verified): George, Matilda, Brian
+ELEVEN_VOICES = {"A": "JBFqnCBsd6RMkjVDRZzb", "B": "XrExE9yKIg1WjnnlVkGX", "C": "nPczCjzI2devNBz1zQrb"}
 MAX_AUDIO = 4_200_000  # AgentMail caps a whole request at 6 MB, and base64 adds a third
 
 
