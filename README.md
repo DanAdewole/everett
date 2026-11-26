@@ -9,6 +9,10 @@ Before every action it takes a checkpoint of its whole computer. If you reply "u
 When you can't decide between two options, it creates a separate computer for each one. Each computer lives through a year of that future and writes you a letter from it. You pick one, and Everett destroys the other.
 
 > **Try it:** email **cc.everett@agentmail.to**. Anyone can. Each sender gets a private space with separate memory, files, reminders and dashboard.
+>
+> **Live page:** [cc-main-hezx.sprites.app](https://cc-main-hezx.sprites.app/about) has live stats and one-click example emails. Opening it wakes the Sprite up.
+>
+> **Demo video:** _link coming soon_
 
 Named after Hugh Everett, the physicist behind the many-worlds interpretation.
 

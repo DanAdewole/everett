@@ -144,7 +144,9 @@ def _block_spoof(full: dict, sender: str, evidence: str) -> None:
     if not db.claim(f"spoof-alert:{db.now()[:13]}"):  # at most one alert per hour: no alert floods
         return
     try:
-        mail.send(sorted(config.OWNER_EMAILS)[:1], "⚠️ Someone tried to impersonate you",
+        # Warn the address that was impersonated (it's one of the owner's own addresses).
+        to = [sender] if sender in config.OWNER_EMAILS else sorted(config.OWNER_EMAILS)[:1]
+        mail.send(to, "⚠️ Someone tried to impersonate you",
                   f"Someone just emailed me pretending to be you ({sender}), subject \"{subject[:80]}\".\n\n"
                   f"It failed email authentication ({evidence}), so I treated it as forged: I didn't read it "
                   f"as an instruction, didn't touch your memory, files or reminders, and didn't reply.\n\n"

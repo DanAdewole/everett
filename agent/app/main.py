@@ -127,6 +127,12 @@ def health():
     return {"ok": True, "agent": config.AGENT_NAME}
 
 
+@app.get("/about", response_class=HTMLResponse)
+def about():
+    """The public landing page, even for a signed-in owner."""
+    return HTMLResponse(landing_page())
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     k = request.query_params.get("k", "")
