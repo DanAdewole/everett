@@ -12,7 +12,7 @@ When you can't decide between two options, it creates a separate computer for ea
 >
 > **Live page:** [cc-main-hezx.sprites.app](https://cc-main-hezx.sprites.app/about) has live stats and one-click example emails. Opening it wakes the Sprite up.
 >
-> **Demo video:** [watch on X](https://x.com/agbaChakra/status/2126331530381316361)
+> **Demo video:** [watch on YouTube](https://youtu.be/BqTS6KdSvGA) · [on X](https://x.com/agbaChakra/status/2126331530381316361)
 
 Named after Hugh Everett, the physicist behind the many-worlds interpretation.
 
